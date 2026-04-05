@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from io import BytesIO
 from pathlib import Path
+import pdfplumber
 
 st.set_page_config(page_title="CaseWare PDF tool", layout="wide")
 st.title("CaseWare PDF -> Excel")
@@ -16,10 +17,16 @@ uploaded_files = st.file_uploader(
 if uploaded_files:
     rows = []
     for f in uploaded_files:
-        rows.append({
-            "bestand": Path(f.name).name,
-            "status": "ontvangen"
-        })
+    tekst = ""
+
+    with pdfplumber.open(f) as pdf:
+        for page in pdf.pages:
+            tekst += page.extract_text() or ""
+
+    rows.append({
+        "bestand": Path(f.name).name,
+        "tekst_preview": tekst[:300]
+    })
 
     df = pd.DataFrame(rows)
     st.subheader("Preview")
