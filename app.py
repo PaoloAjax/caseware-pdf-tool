@@ -6,14 +6,9 @@ import pandas as pd
 import pdfplumber
 import streamlit as st
 
-# =========================================================
-# Streamlit setup
-# =========================================================
 st.set_page_config(page_title="CaseWare PDF -> Excel", layout="wide")
 st.title("CaseWare PDF -> Excel")
-st.write(
-    "Upload CaseWare PDF-exports, herken vragen en exporteer alles naar Excel."
-)
+st.write("Upload CaseWare PDF-exports, herken vragen en exporteer naar Excel.")
 
 # =========================================================
 # Helpers
@@ -28,48 +23,21 @@ def normalize_line(line: str) -> str:
     return line
 
 
-def is_bullet_line(line: str) -> bool:
+def clean_title(title: str) -> str:
+    title = normalize_line(title)
+    title = re.sub(r"\s*\.\.\.\s*$", "", title)   # haal trailing ... weg
+    title = re.sub(r"\s+", " ", title).strip()
+    return title
+
+
+def is_bullet_start(line: str) -> bool:
     return bool(re.match(r"^[-•*]\s+", line))
 
 
 def normalize_bullet(line: str) -> str:
-    line = re.sub(r"^[-•*]\s*", "- ", line)
-    line = re.sub(r"\s+", " ", line).strip()
-    return line
-
-
-def clean_multiline_text(lines: list[str]) -> str:
-    """
-    Bouw nette vraagtekst op.
-    Bullets blijven op aparte regels.
-    Gewone tekstregels worden samengevoegd.
-    """
-    output = []
-    paragraph = []
-
-    def flush_paragraph():
-        nonlocal paragraph, output
-        if paragraph:
-            text = " ".join(paragraph)
-            text = re.sub(r"\s+([,.;:])", r"\1", text)
-            text = re.sub(r"\(\s+", "(", text)
-            text = re.sub(r"\s+\)", ")", text)
-            output.append(text.strip())
-            paragraph = []
-
-    for line in lines:
-        line = normalize_line(line)
-        if not line:
-            continue
-
-        if is_bullet_line(line):
-            flush_paragraph()
-            output.append(normalize_bullet(line))
-        else:
-            paragraph.append(line)
-
-    flush_paragraph()
-    return "\n".join(output).strip()
+    line = re.sub(r"^[-•*]\s*", "", line)
+    line = normalize_line(line)
+    return f"- {line}"
 
 
 # =========================================================
@@ -135,7 +103,6 @@ def detect_question_start(line: str):
     1 KICK-OFF
     2 VOORRAAD
     10 LIQUIDE MIDDELEN
-    3 Debiteuren
     """
     line = normalize_line(line)
     match = re.match(r"^(\d+)\s+(.+)$", line)
@@ -143,13 +110,12 @@ def detect_question_start(line: str):
         return None
 
     nr = match.group(1).strip()
-    title = match.group(2).strip()
+    title = clean_title(match.group(2).strip())
 
-    # Bescherming tegen onzinregels
     if len(title) < 2:
         return None
 
-    # Vermijd jaartallen / paginaregels als vraagstart
+    # vermijd jaartallen als false positive
     if len(nr) == 4 and nr.startswith(("19", "20")):
         return None
 
@@ -160,29 +126,73 @@ def detect_question_start(line: str):
 # PDF extractie
 # =========================================================
 def extract_lines_from_pdf(file_obj) -> list[str]:
-    """
-    Leest PDF met pdfplumber en geeft genormaliseerde regels terug.
-    """
-    extracted_lines = []
+    lines = []
 
     with pdfplumber.open(file_obj) as pdf:
         for page in pdf.pages:
             text = page.extract_text() or ""
-            raw_lines = text.split("\n")
-
-            for raw_line in raw_lines:
+            for raw_line in text.split("\n"):
                 line = normalize_line(raw_line)
                 if line:
-                    extracted_lines.append(line)
+                    lines.append(line)
 
-    return extracted_lines
+    return lines
 
 
 # =========================================================
-# Parser
+# Body opbouwen
 # =========================================================
+def build_question_body(body_lines: list[str]) -> str:
+    """
+    Maak van losse PDF-regels nette alinea's + bullets.
+    """
+    result = []
+    current_paragraph = []
+    current_bullet = None
+
+    def flush_paragraph():
+        nonlocal current_paragraph, result
+        if current_paragraph:
+            text = " ".join(current_paragraph)
+            text = re.sub(r"\s+([,.;:])", r"\1", text)
+            text = re.sub(r"\(\s+", "(", text)
+            text = re.sub(r"\s+\)", ")", text)
+            result.append(text.strip())
+            current_paragraph = []
+
+    def flush_bullet():
+        nonlocal current_bullet, result
+        if current_bullet:
+            text = current_bullet
+            text = re.sub(r"\s+([,.;:])", r"\1", text)
+            text = re.sub(r"\(\s+", "(", text)
+            text = re.sub(r"\s+\)", ")", text)
+            result.append(text.strip())
+            current_bullet = None
+
+    for raw_line in body_lines:
+        line = normalize_line(raw_line)
+        if not line:
+            continue
+
+        if is_bullet_start(line):
+            flush_paragraph()
+            flush_bullet()
+            current_bullet = normalize_bullet(line)
+        else:
+            if current_bullet is not None:
+                current_bullet += " " + line
+            else:
+                current_paragraph.append(line)
+
+    flush_paragraph()
+    flush_bullet()
+
+    return "\n".join(result).strip()
+
+
 def build_question_text(title: str, body_lines: list[str]) -> str:
-    body = clean_multiline_text(body_lines)
+    body = build_question_body(body_lines)
 
     if title and body:
         return f"{title}\n\n{body}"
@@ -191,6 +201,9 @@ def build_question_text(title: str, body_lines: list[str]) -> str:
     return body
 
 
+# =========================================================
+# Parser
+# =========================================================
 def parse_caseware_questions(lines: list[str]) -> list[dict]:
     questions = []
 
@@ -208,7 +221,6 @@ def parse_caseware_questions(lines: list[str]) -> list[dict]:
                     "titel": current_title,
                     "vraag": vraag
                 })
-
                 current_nr = None
                 current_title = None
                 current_body = []
@@ -236,7 +248,6 @@ def parse_caseware_questions(lines: list[str]) -> list[dict]:
         if in_question:
             current_body.append(line)
 
-    # laatste open vraag nog opslaan
     if in_question:
         vraag = build_question_text(current_title, current_body)
         questions.append({
@@ -245,7 +256,6 @@ def parse_caseware_questions(lines: list[str]) -> list[dict]:
             "vraag": vraag
         })
 
-    # laatste opschoning
     cleaned_questions = []
     for q in questions:
         vraag = q["vraag"].strip()
@@ -324,12 +334,8 @@ st.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
-# =========================================================
-# Debug sectie
-# =========================================================
 if show_debug:
     st.subheader("Debug")
-
     for item in debug_data:
         with st.expander(f"Debug: {item['bestand']}"):
             st.write("Ruwe/genormaliseerde regels")
