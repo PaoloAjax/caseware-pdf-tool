@@ -12,10 +12,58 @@ from openai import OpenAI
 # =========================================================
 st.set_page_config(page_title="CaseWare PDF -> Excel", layout="wide")
 st.title("CaseWare PDF -> Excel")
-st.write("Upload CaseWare PDF-exports en zet ze om naar gestructureerde vragen in Excel.")
+st.write(
+    "Upload CaseWare PDF-exports, herken vragen, genereer optioneel AI-antwoorden "
+    "en exporteer alles naar Excel."
+)
 
 # =========================================================
-# Helpers
+# OpenAI helpers
+# =========================================================
+def get_openai_client():
+    api_key = st.secrets.get("OPENAI_API_KEY", "")
+    if not api_key:
+        return None
+    return OpenAI(api_key=api_key)
+
+
+def build_caseware_prompt(vraag_text: str) -> str:
+    return f"""
+Je helpt bij het opstellen van een professioneel dossierantwoord voor een CaseWare werkprogramma.
+
+Schrijf in het Nederlands.
+Schrijf zakelijk, concreet en compact.
+Gebruik geen markdown.
+Gebruik geen titel, geen inleiding en geen afsluiting.
+Schrijf direct de tekst die in 'Onderbouwing (verplicht)' geplakt kan worden.
+
+Belangrijke regels:
+- Verwerk expliciet de onderdelen uit de instructie.
+- Als de instructie meerdere punten bevat, geef dan een nette, zakelijke puntsgewijze uitwerking.
+- Verzin geen feitelijke details die niet bekend zijn.
+- Als informatie ontbreekt, benoem dan professioneel dat dit nog moet worden afgestemd, onderbouwd of aangevuld.
+- Schrijf alsof dit dossierdocumentatie is van een accountant.
+
+Instructie:
+{vraag_text}
+""".strip()
+
+
+def generate_ai_answer(client, vraag_text: str, model_name: str) -> str:
+    prompt = build_caseware_prompt(vraag_text)
+
+    try:
+        response = client.responses.create(
+            model=model_name,
+            input=prompt
+        )
+        return response.output_text.strip()
+    except Exception as e:
+        return f"AI fout: {e}"
+
+
+# =========================================================
+# Text helpers
 # =========================================================
 def normalize_line(line: str) -> str:
     if not line:
@@ -44,7 +92,7 @@ def normalize_bullet(line: str) -> str:
 
 
 # =========================================================
-# Ruisfilter
+# Noise filter
 # =========================================================
 NOISE_EXACT = {
     "...",
@@ -97,7 +145,7 @@ def is_question_end_marker(line: str) -> bool:
 
 
 # =========================================================
-# Vraagstart detectie
+# Question start detection
 # =========================================================
 def detect_question_start(line: str):
     line = normalize_line(line)
@@ -119,7 +167,7 @@ def detect_question_start(line: str):
 
 
 # =========================================================
-# PDF extractie
+# PDF extraction
 # =========================================================
 def extract_lines_from_pdf(file_obj):
     lines = []
@@ -136,7 +184,7 @@ def extract_lines_from_pdf(file_obj):
 
 
 # =========================================================
-# Body builder (BELANGRIJKSTE DEEL)
+# Body builder
 # =========================================================
 def build_question_body(body_lines):
     result = []
@@ -148,6 +196,8 @@ def build_question_body(body_lines):
         if current_paragraph:
             text = " ".join(current_paragraph)
             text = re.sub(r"\s+([,.;:])", r"\1", text)
+            text = re.sub(r"\(\s+", "(", text)
+            text = re.sub(r"\s+\)", ")", text)
             result.append(text.strip())
             current_paragraph = []
 
@@ -155,6 +205,8 @@ def build_question_body(body_lines):
         nonlocal current_bullet
         if current_bullet:
             text = re.sub(r"\s+([,.;:])", r"\1", current_bullet)
+            text = re.sub(r"\(\s+", "(", text)
+            text = re.sub(r"\s+\)", ")", text)
             result.append(text.strip())
             current_bullet = None
 
@@ -168,10 +220,8 @@ def build_question_body(body_lines):
             flush_paragraph()
             flush_bullet()
             current_bullet = normalize_bullet(line)
-
         else:
             if current_bullet is not None:
-                # FIX: bullet door laten lopen
                 if not current_bullet.endswith("."):
                     current_bullet += " " + line
                 else:
@@ -191,10 +241,9 @@ def build_question_text(title, body_lines):
 
     if title and body:
         return f"{title}\n\n{body}"
-    elif title:
+    if title:
         return title
-    else:
-        return body
+    return body
 
 
 # =========================================================
@@ -209,7 +258,6 @@ def parse_caseware_questions(lines):
     in_question = False
 
     for line in lines:
-
         if is_question_end_marker(line):
             if in_question:
                 vraag = build_question_text(current_title, current_body)
@@ -218,7 +266,6 @@ def parse_caseware_questions(lines):
                     "titel": current_title,
                     "vraag": vraag
                 })
-
                 current_nr = None
                 current_title = None
                 current_body = []
@@ -254,7 +301,14 @@ def parse_caseware_questions(lines):
             "vraag": vraag
         })
 
-    return questions
+    cleaned_questions = []
+    for q in questions:
+        vraag = q["vraag"].strip()
+        if len(vraag) < 5:
+            continue
+        cleaned_questions.append(q)
+
+    return cleaned_questions
 
 
 # =========================================================
@@ -263,12 +317,22 @@ def parse_caseware_questions(lines):
 def to_excel_bytes(df):
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False)
+        df.to_excel(writer, index=False, sheet_name="overzicht")
     return buffer.getvalue()
 
 
 # =========================================================
-# UI
+# Sidebar
+# =========================================================
+with st.sidebar:
+    st.subheader("Instellingen")
+    show_debug = st.checkbox("Toon debug-info", value=False)
+    generate_ai = st.checkbox("Genereer AI-antwoorden", value=False)
+    model_name = st.text_input("Model", value="gpt-5.4")
+
+
+# =========================================================
+# File upload
 # =========================================================
 uploaded_files = st.file_uploader(
     "Upload PDF-bestanden",
@@ -280,18 +344,47 @@ if not uploaded_files:
     st.info("Upload eerst een PDF.")
     st.stop()
 
+
+# =========================================================
+# OpenAI client
+# =========================================================
+client = None
+if generate_ai:
+    client = get_openai_client()
+    if client is None:
+        st.error("OPENAI_API_KEY ontbreekt in Streamlit secrets.")
+        st.stop()
+
+
+# =========================================================
+# Main processing
+# =========================================================
 rows = []
+debug_data = []
 
 for f in uploaded_files:
     lines = extract_lines_from_pdf(f)
     questions = parse_caseware_questions(lines)
 
+    if show_debug:
+        debug_data.append({
+            "bestand": f.name,
+            "regels": lines,
+            "vragen": questions
+        })
+
     for q in questions:
+        ai_answer = ""
+
+        if generate_ai:
+            ai_answer = generate_ai_answer(client, q["vraag"], model_name)
+
         rows.append({
             "bestand": Path(f.name).name,
             "nr": q["nr"],
             "titel": q["titel"],
-            "vraag": q["vraag"]
+            "vraag": q["vraag"],
+            "ai_antwoord": ai_answer
         })
 
 df = pd.DataFrame(rows)
@@ -307,3 +400,17 @@ st.download_button(
     file_name="caseware_overzicht.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
+
+# =========================================================
+# Debug
+# =========================================================
+if show_debug:
+    st.subheader("Debug")
+
+    for item in debug_data:
+        with st.expander(f"Debug: {item['bestand']}"):
+            st.write("Ruwe/genormaliseerde regels")
+            st.write(item["regels"])
+
+            st.write("Gevonden vragen")
+            st.json(item["vragen"])
