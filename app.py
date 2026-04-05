@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 import pdfplumber
 import streamlit as st
+from openai import OpenAI
 
 # =========================================================
 # Streamlit setup
