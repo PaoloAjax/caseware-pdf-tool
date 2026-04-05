@@ -22,12 +22,17 @@ if uploaded_files:
 
         with pdfplumber.open(f) as pdf:
             for page in pdf.pages:
-                tekst += page.extract_text() or ""
+                tekst += (page.extract_text() or "") + "\n"
 
-        rows.append({
-            "bestand": Path(f.name).name,
-            "tekst_preview": tekst[:300]
-        })
+        regels = tekst.split("\n")
+
+        for regel in regels:
+            regel_schoon = regel.strip()
+            if regel_schoon:
+                rows.append({
+                    "bestand": Path(f.name).name,
+                    "regel": regel_schoon
+                })
 
     df = pd.DataFrame(rows)
     st.subheader("Preview")
