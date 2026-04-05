@@ -16,17 +16,18 @@ uploaded_files = st.file_uploader(
 
 if uploaded_files:
     rows = []
+
     for f in uploaded_files:
-    tekst = ""
+        tekst = ""
 
-    with pdfplumber.open(f) as pdf:
-        for page in pdf.pages:
-            tekst += page.extract_text() or ""
+        with pdfplumber.open(f) as pdf:
+            for page in pdf.pages:
+                tekst += page.extract_text() or ""
 
-    rows.append({
-        "bestand": Path(f.name).name,
-        "tekst_preview": tekst[:300]
-    })
+        rows.append({
+            "bestand": Path(f.name).name,
+            "tekst_preview": tekst[:300]
+        })
 
     df = pd.DataFrame(rows)
     st.subheader("Preview")
