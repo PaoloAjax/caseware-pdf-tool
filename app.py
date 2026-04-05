@@ -6,7 +6,7 @@ import pdfplumber
 
 st.set_page_config(page_title="CaseWare PDF tool", layout="wide")
 st.title("CaseWare PDF -> Excel")
-st.write("Upload je PDF-exports. Deze eerste versie zet alleen bestandsnamen in een Excel.")
+st.write("Upload je PDF-exports. Deze versie zet PDF-tekst om naar instructieblokken in Excel.")
 
 uploaded_files = st.file_uploader(
     "Upload PDF-bestanden",
@@ -26,37 +26,36 @@ if uploaded_files:
 
         regels = tekst.split("\n")
 
-regels = tekst.split("\n")
+        current_text = ""
+        blocks = []
 
-current_text = ""
-blocks = []
+        for regel in regels:
+            regel = regel.strip()
 
-for regel in regels:
-    regel = regel.strip()
+            if not regel:
+                continue
 
-    if not regel:
-        continue
+            if any(x in regel.lower() for x in [
+                "cliëntnaam", "tabblad", "volgnr", "naam datum", "opgesteld"
+            ]):
+                continue
 
-    if any(x in regel.lower() for x in [
-        "cliëntnaam", "tabblad", "volgnr", "naam datum", "opgesteld"
-    ]):
-        continue
+            if regel.startswith("1 ") or regel.startswith("2 ") or regel.startswith("3 "):
+                if current_text:
+                    blocks.append(current_text.strip())
+                current_text = regel
+            else:
+                current_text += " " + regel
 
-    if regel.startswith("1 ") or regel.startswith("2 ") or regel.startswith("3 "):
         if current_text:
             blocks.append(current_text.strip())
-        current_text = regel
-    else:
-        current_text += " " + regel
 
-if current_text:
-    blocks.append(current_text.strip())
+        for block in blocks:
+            rows.append({
+                "bestand": Path(f.name).name,
+                "instructie": block
+            })
 
-for block in blocks:
-    rows.append({
-        "bestand": Path(f.name).name,
-        "instructie": block
-    })
     df = pd.DataFrame(rows)
     st.subheader("Preview")
     st.dataframe(df, use_container_width=True)
