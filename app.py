@@ -175,15 +175,22 @@ def build_question_body(body_lines: list[str]) -> str:
         if not line:
             continue
 
-        if is_bullet_start(line):
-            flush_paragraph()
-            flush_bullet()
-            current_bullet = normalize_bullet(line)
+ if is_bullet_start(line):
+    flush_paragraph()
+    flush_bullet()
+    current_bullet = normalize_bullet(line)
+
+else:
+    # Belangrijk: check of dit waarschijnlijk doorlopende bullet is
+    if current_bullet is not None:
+        # als regel niet eindigt op punt → waarschijnlijk doorlopend
+        if not current_bullet.endswith("."):
+            current_bullet += " " + line
         else:
-            if current_bullet is not None:
-                current_bullet += " " + line
-            else:
-                current_paragraph.append(line)
+            flush_bullet()
+            current_paragraph.append(line)
+    else:
+        current_paragraph.append(line)
 
     flush_paragraph()
     flush_bullet()
