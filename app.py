@@ -5,7 +5,6 @@ from pathlib import Path
 import pandas as pd
 import pdfplumber
 import streamlit as st
-from openai import OpenAI
 
 # =========================================================
 # Streamlit setup
@@ -13,21 +12,11 @@ from openai import OpenAI
 st.set_page_config(page_title="CaseWare PDF -> Excel", layout="wide")
 st.title("CaseWare PDF -> Excel")
 st.write(
-    "Upload CaseWare PDF-exports, herken vragen, genereer AI-antwoorden "
-    "en exporteer alles naar Excel."
+    "Upload CaseWare PDF-exports, herken vragen en exporteer alles naar Excel."
 )
 
 # =========================================================
-# OpenAI helper
-# =========================================================
-def get_openai_client():
-    api_key = st.secrets.get("OPENAI_API_KEY", "")
-    if not api_key:
-        return None
-    return OpenAI(api_key=api_key)
-
-# =========================================================
-# Text helpers
+# Helpers
 # =========================================================
 def normalize_line(line: str) -> str:
     if not line:
@@ -35,6 +24,16 @@ def normalize_line(line: str) -> str:
     line = line.replace("\xa0", " ")
     line = line.replace("’", "'").replace("‘", "'")
     line = line.replace("“", '"').replace("”", '"')
+    line = re.sub(r"\s+", " ", line).strip()
+    return line
+
+
+def is_bullet_line(line: str) -> bool:
+    return bool(re.match(r"^[-•*]\s+", line))
+
+
+def normalize_bullet(line: str) -> str:
+    line = re.sub(r"^[-•*]\s*", "- ", line)
     line = re.sub(r"\s+", " ", line).strip()
     return line
 
@@ -73,18 +72,8 @@ def clean_multiline_text(lines: list[str]) -> str:
     return "\n".join(output).strip()
 
 
-def is_bullet_line(line: str) -> bool:
-    return bool(re.match(r"^[-•*]\s+", line))
-
-
-def normalize_bullet(line: str) -> str:
-    line = re.sub(r"^[-•*]\s*", "- ", line)
-    line = re.sub(r"\s+", " ", line).strip()
-    return line
-
-
 # =========================================================
-# Noise detection
+# Ruisfilter
 # =========================================================
 NOISE_EXACT = {
     "...",
@@ -113,6 +102,7 @@ QUESTION_END_MARKERS = {
     "onderbouwing",
 }
 
+
 def is_noise_line(line: str) -> bool:
     low = normalize_line(line).lower()
 
@@ -125,12 +115,8 @@ def is_noise_line(line: str) -> bool:
     if any(low.startswith(prefix) for prefix in NOISE_STARTS):
         return True
 
-    # pagina-indicatie zoals 1/1
+    # pagina zoals 1/1 of 2/5
     if re.match(r"^\d+\s*/\s*\d+$", low):
-        return True
-
-    # losse administratieve regel
-    if re.match(r"^[a-z]+\s+[a-z]+$", low) and low in {"naam datum", "opgesteld door"}:
         return True
 
     return False
@@ -141,7 +127,7 @@ def is_question_end_marker(line: str) -> bool:
 
 
 # =========================================================
-# Question start detection
+# Vraagstart detectie
 # =========================================================
 def detect_question_start(line: str):
     """
@@ -159,8 +145,12 @@ def detect_question_start(line: str):
     nr = match.group(1).strip()
     title = match.group(2).strip()
 
-    # Bescherm tegen rommel zoals "2025 4. 1. 1 1/1"
+    # Bescherming tegen onzinregels
     if len(title) < 2:
+        return None
+
+    # Vermijd jaartallen / paginaregels als vraagstart
+    if len(nr) == 4 and nr.startswith(("19", "20")):
         return None
 
     return nr, title
@@ -171,7 +161,7 @@ def detect_question_start(line: str):
 # =========================================================
 def extract_lines_from_pdf(file_obj) -> list[str]:
     """
-    Leest alle pagina's uit pdfplumber en geeft genormaliseerde regels terug.
+    Leest PDF met pdfplumber en geeft genormaliseerde regels terug.
     """
     extracted_lines = []
 
@@ -202,9 +192,6 @@ def build_question_text(title: str, body_lines: list[str]) -> str:
 
 
 def parse_caseware_questions(lines: list[str]) -> list[dict]:
-    """
-    Parseert CaseWare-achtige PDF regels naar vragen.
-    """
     questions = []
 
     current_nr = None
@@ -213,9 +200,6 @@ def parse_caseware_questions(lines: list[str]) -> list[dict]:
     in_question = False
 
     for line in lines:
-        if is_noise_line(line):
-            continue
-
         if is_question_end_marker(line):
             if in_question:
                 vraag = build_question_text(current_title, current_body)
@@ -231,9 +215,11 @@ def parse_caseware_questions(lines: list[str]) -> list[dict]:
                 in_question = False
             continue
 
+        if is_noise_line(line):
+            continue
+
         question_start = detect_question_start(line)
         if question_start:
-            # vorige vraag eerst opslaan
             if in_question:
                 vraag = build_question_text(current_title, current_body)
                 questions.append({
@@ -262,58 +248,17 @@ def parse_caseware_questions(lines: list[str]) -> list[dict]:
     # laatste opschoning
     cleaned_questions = []
     for q in questions:
-        vraag = normalize_line(q["vraag"].replace("\n", " \n "))
-        vraag = re.sub(r" ?\n ?", "\n", vraag).strip()
-
+        vraag = q["vraag"].strip()
         if len(vraag) < 5:
             continue
 
         cleaned_questions.append({
             "nr": q["nr"],
             "titel": q["titel"],
-            "vraag": q["vraag"].strip()
+            "vraag": vraag
         })
 
     return cleaned_questions
-
-
-# =========================================================
-# AI prompt & generatie
-# =========================================================
-def build_caseware_prompt(vraag_text: str) -> str:
-    return f"""
-Je helpt bij het opstellen van een professioneel dossierantwoord voor een CaseWare werkprogramma.
-
-Schrijf in het Nederlands.
-Schrijf zakelijk, concreet en compact.
-Gebruik geen markdown.
-Gebruik geen titel, geen inleiding en geen afsluiting.
-Schrijf direct de tekst die in 'Onderbouwing (verplicht)' geplakt kan worden.
-
-Belangrijke regels:
-- Verwerk expliciet de onderdelen uit de instructie.
-- Als de instructie meerdere punten bevat, geef dan een nette, zakelijke puntsgewijze uitwerking.
-- Verzin geen feitelijke details die niet bekend zijn.
-- Als informatie ontbreekt, benoem dan professioneel dat dit nog moet worden afgestemd, onderbouwd of aangevuld.
-- Schrijf alsof dit dossierdocumentatie is van een accountant.
-- Houd de toon professioneel en bruikbaar voor direct copy-paste gebruik.
-
-Instructie:
-{vraag_text}
-""".strip()
-
-
-def generate_ai_answer(client: OpenAI, vraag_text: str, model_name: str) -> str:
-    prompt = build_caseware_prompt(vraag_text)
-
-    try:
-        response = client.responses.create(
-            model=model_name,
-            input=prompt
-        )
-        return response.output_text.strip()
-    except Exception as e:
-        return f"AI fout: {e}"
 
 
 # =========================================================
@@ -331,8 +276,6 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
 # =========================================================
 with st.sidebar:
     st.subheader("Instellingen")
-    generate_ai = st.checkbox("Genereer AI-antwoorden", value=False)
-    model_name = st.text_input("OpenAI model", value="gpt-5.4")
     show_debug = st.checkbox("Toon debug-info", value=False)
 
 uploaded_files = st.file_uploader(
@@ -343,11 +286,6 @@ uploaded_files = st.file_uploader(
 
 if not uploaded_files:
     st.info("Nog geen PDF's geüpload.")
-    st.stop()
-
-client = get_openai_client()
-if generate_ai and client is None:
-    st.error("OPENAI_API_KEY ontbreekt in st.secrets.")
     st.stop()
 
 all_rows = []
@@ -365,17 +303,11 @@ for f in uploaded_files:
         })
 
     for q in questions:
-        ai_answer = ""
-        if generate_ai:
-            ai_answer = generate_ai_answer(client, q["vraag"], model_name)
-
         all_rows.append({
             "bestand": Path(f.name).name,
             "nr": q["nr"],
             "titel": q["titel"],
-            "vraag": q["vraag"],
-            "ai_antwoord": ai_answer,
-            "kopieer_antwoord": ai_answer
+            "vraag": q["vraag"]
         })
 
 df = pd.DataFrame(all_rows)
