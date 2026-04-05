@@ -26,14 +26,37 @@ if uploaded_files:
 
         regels = tekst.split("\n")
 
-        for regel in regels:
-            regel_schoon = regel.strip()
-            if regel_schoon:
-                rows.append({
-                    "bestand": Path(f.name).name,
-                    "regel": regel_schoon
-                })
+regels = tekst.split("\n")
 
+current_text = ""
+blocks = []
+
+for regel in regels:
+    regel = regel.strip()
+
+    if not regel:
+        continue
+
+    if any(x in regel.lower() for x in [
+        "cliëntnaam", "tabblad", "volgnr", "naam datum", "opgesteld"
+    ]):
+        continue
+
+    if regel.startswith("1 ") or regel.startswith("2 ") or regel.startswith("3 "):
+        if current_text:
+            blocks.append(current_text.strip())
+        current_text = regel
+    else:
+        current_text += " " + regel
+
+if current_text:
+    blocks.append(current_text.strip())
+
+for block in blocks:
+    rows.append({
+        "bestand": Path(f.name).name,
+        "instructie": block
+    })
     df = pd.DataFrame(rows)
     st.subheader("Preview")
     st.dataframe(df, use_container_width=True)
