@@ -154,23 +154,66 @@ def is_question_end_marker(line: str) -> bool:
 # =========================================================
 # Question start detection
 # =========================================================
+def is_likely_uppercase_title(line: str) -> bool:
+    """
+    Herken ongenummerde titels zoals:
+    BUA
+    REKENING COURANT PRIVÉ
+    VASTLEGGEN RONDREKENING & OVERWEGEN SUPPLETIE:
+    """
+    line = normalize_line(line)
+
+    if not line:
+        return False
+
+    if is_noise_line(line):
+        return False
+
+    if is_question_end_marker(line):
+        return False
+
+    # geen bullets
+    if is_bullet_start(line):
+        return False
+
+    # niet te lang
+    if len(line) > 120:
+        return False
+
+    # moet letters bevatten
+    letters = [c for c in line if c.isalpha()]
+    if not letters:
+        return False
+
+    # aandeel hoofdletters
+    uppercase_letters = [c for c in letters if c.isupper()]
+    ratio = len(uppercase_letters) / len(letters)
+
+    # vrij streng, maar werkt goed voor CaseWare titels
+    if ratio >= 0.7:
+        return True
+
+    return False
+
+
 def detect_question_start(line: str):
     line = normalize_line(line)
 
+    # 1) Genummerde titel
     match = re.match(r"^(\d+)\s+(.+)$", line)
-    if not match:
-        return None
+    if match:
+        nr = match.group(1).strip()
+        title = clean_title(match.group(2).strip())
 
-    nr = match.group(1).strip()
-    title = clean_title(match.group(2).strip())
+        if len(title) >= 2:
+            if not (len(nr) == 4 and nr.startswith(("19", "20"))):
+                return nr, title
 
-    if len(title) < 2:
-        return None
+    # 2) Ongenummerde titel
+    if is_likely_uppercase_title(line):
+        return "", clean_title(line)
 
-    if len(nr) == 4 and nr.startswith(("19", "20")):
-        return None
-
-    return nr, title
+    return None
 
 
 # =========================================================
