@@ -1,3 +1,4 @@
+import hashlib
 import re
 from io import BytesIO
 from pathlib import Path
@@ -13,9 +14,24 @@ from openai import OpenAI
 st.set_page_config(page_title="CaseWare PDF -> Excel", layout="wide")
 st.title("CaseWare PDF -> Excel")
 st.write(
-    "Upload CaseWare PDF-exports, herken vragen, genereer optioneel AI-antwoorden "
-    "en exporteer alles naar Excel."
+    "Upload CaseWare PDF-exports, verwerk eerst de vragen en genereer daarna "
+    "optioneel AI-antwoorden."
 )
+
+PROMPT_VERSION = "v1"
+
+# =========================================================
+# Session state init
+# =========================================================
+if "parsed_rows" not in st.session_state:
+    st.session_state.parsed_rows = []
+
+if "ai_rows" not in st.session_state:
+    st.session_state.ai_rows = []
+
+if "last_file_signature" not in st.session_state:
+    st.session_state.last_file_signature = None
+
 
 # =========================================================
 # OpenAI helpers
@@ -27,7 +43,7 @@ def get_openai_client():
     return OpenAI(api_key=api_key)
 
 
-def build_caseware_prompt(vraag_text: str) -> str:
+def build_caseware_prompt(vraag_text: str, dossier_context: str) -> str:
     return f"""
 Je helpt bij het opstellen van een professioneel dossierantwoord voor een CaseWare werkprogramma.
 
@@ -39,18 +55,34 @@ Schrijf direct de tekst die in 'Onderbouwing (verplicht)' geplakt kan worden.
 
 Belangrijke regels:
 - Verwerk expliciet de onderdelen uit de instructie.
-- Als de instructie meerdere punten bevat, geef dan een nette, zakelijke puntsgewijze uitwerking.
+- Gebruik de meegeleverde dossiercontext als bron voor het antwoord.
 - Verzin geen feitelijke details die niet bekend zijn.
 - Als informatie ontbreekt, benoem dan professioneel dat dit nog moet worden afgestemd, onderbouwd of aangevuld.
 - Schrijf alsof dit dossierdocumentatie is van een accountant.
+- Als de instructie meerdere punten bevat, geef dan een nette puntsgewijze uitwerking.
+- Gebruik alleen informatie die volgt uit de context of logisch neutraal geformuleerd kan worden.
 
-Instructie:
+Vraag / instructie:
 {vraag_text}
+
+Dossiercontext uit geüploade PDF's:
+{dossier_context}
 """.strip()
 
 
-def generate_ai_answer(client, vraag_text: str, model_name: str) -> str:
-    prompt = build_caseware_prompt(vraag_text)
+@st.cache_data(show_spinner=False)
+def cached_generate_ai_answer(
+    vraag_text: str,
+    dossier_context: str,
+    model_name: str,
+    prompt_version: str
+) -> str:
+    api_key = st.secrets.get("OPENAI_API_KEY", "")
+    if not api_key:
+        return "AI fout: OPENAI_API_KEY ontbreekt in Streamlit secrets."
+
+    client = OpenAI(api_key=api_key)
+    prompt = build_caseware_prompt(vraag_text, dossier_context)
 
     try:
         response = client.responses.create(
@@ -58,10 +90,8 @@ def generate_ai_answer(client, vraag_text: str, model_name: str) -> str:
             input=prompt
         )
         text = response.output_text.strip()
-
         if not text:
             return "AI fout: leeg antwoord ontvangen."
-
         return text
     except Exception as e:
         return f"AI fout: {e}"
@@ -155,12 +185,6 @@ def is_question_end_marker(line: str) -> bool:
 # Question start detection
 # =========================================================
 def is_likely_uppercase_title(line: str) -> bool:
-    """
-    Herken ongenummerde titels zoals:
-    BUA
-    REKENING COURANT PRIVÉ
-    VASTLEGGEN RONDREKENING & OVERWEGEN SUPPLETIE:
-    """
     line = normalize_line(line)
 
     if not line:
@@ -172,34 +196,25 @@ def is_likely_uppercase_title(line: str) -> bool:
     if is_question_end_marker(line):
         return False
 
-    # geen bullets
     if is_bullet_start(line):
         return False
 
-    # niet te lang
     if len(line) > 120:
         return False
 
-    # moet letters bevatten
     letters = [c for c in line if c.isalpha()]
     if not letters:
         return False
 
-    # aandeel hoofdletters
     uppercase_letters = [c for c in letters if c.isupper()]
     ratio = len(uppercase_letters) / len(letters)
 
-    # vrij streng, maar werkt goed voor CaseWare titels
-    if ratio >= 0.7:
-        return True
-
-    return False
+    return ratio >= 0.7
 
 
 def detect_question_start(line: str):
     line = normalize_line(line)
 
-    # 1) Genummerde titel
     match = re.match(r"^(\d+)\s+(.+)$", line)
     if match:
         nr = match.group(1).strip()
@@ -209,7 +224,6 @@ def detect_question_start(line: str):
             if not (len(nr) == 4 and nr.startswith(("19", "20"))):
                 return nr, title
 
-    # 2) Ongenummerde titel
     if is_likely_uppercase_title(line):
         return "", clean_title(line)
 
@@ -217,12 +231,12 @@ def detect_question_start(line: str):
 
 
 # =========================================================
-# PDF extraction
+# PDF extraction and parsing
 # =========================================================
-def extract_lines_from_pdf(file_obj):
+def extract_lines_from_pdf_bytes(file_bytes: bytes):
     lines = []
 
-    with pdfplumber.open(file_obj) as pdf:
+    with pdfplumber.open(BytesIO(file_bytes)) as pdf:
         for page in pdf.pages:
             text = page.extract_text() or ""
             for raw_line in text.split("\n"):
@@ -233,9 +247,6 @@ def extract_lines_from_pdf(file_obj):
     return lines
 
 
-# =========================================================
-# Body builder
-# =========================================================
 def build_question_body(body_lines):
     result = []
     current_paragraph = []
@@ -292,9 +303,6 @@ def build_question_text(title, body_lines):
     return body
 
 
-# =========================================================
-# Parser
-# =========================================================
 def parse_caseware_questions(lines):
     questions = []
 
@@ -357,10 +365,47 @@ def parse_caseware_questions(lines):
     return cleaned_questions
 
 
+@st.cache_data(show_spinner=False)
+def parse_pdf_to_questions(file_name: str, file_bytes: bytes):
+    lines = extract_lines_from_pdf_bytes(file_bytes)
+    questions = parse_caseware_questions(lines)
+    return {
+        "bestand": file_name,
+        "lines": lines,
+        "questions": questions,
+    }
+
+
 # =========================================================
-# Excel export
+# Context helpers
 # =========================================================
-def to_excel_bytes(df):
+def build_file_signature(uploaded_files):
+    hasher = hashlib.sha256()
+
+    for f in uploaded_files:
+        file_bytes = f.getvalue()
+        hasher.update(f.name.encode("utf-8"))
+        hasher.update(file_bytes)
+
+    return hasher.hexdigest()
+
+
+def build_global_context(parsed_rows):
+    parts = []
+
+    for row in parsed_rows:
+        parts.append(
+            f"Bestand: {row['bestand']}\n"
+            f"Titel: {row['titel']}\n"
+            f"Vraag:\n{row['vraag']}\n"
+        )
+
+    return "\n---\n".join(parts).strip()
+
+
+@st.cache_data(show_spinner=False)
+def dataframe_to_excel_bytes(records):
+    df = pd.DataFrame(records)
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="overzicht")
@@ -373,12 +418,17 @@ def to_excel_bytes(df):
 with st.sidebar:
     st.subheader("Instellingen")
     show_debug = st.checkbox("Toon debug-info", value=False)
-    generate_ai = st.checkbox("Genereer AI-antwoorden", value=False)
     model_name = st.text_input("Model", value="gpt-4.1-mini")
+
+    if st.button("Reset sessie"):
+        st.session_state.parsed_rows = []
+        st.session_state.ai_rows = []
+        st.session_state.last_file_signature = None
+        st.rerun()
 
 
 # =========================================================
-# File upload
+# Upload
 # =========================================================
 uploaded_files = st.file_uploader(
     "Upload PDF-bestanden",
@@ -387,80 +437,126 @@ uploaded_files = st.file_uploader(
 )
 
 if not uploaded_files:
-    st.info("Upload eerst een PDF.")
+    st.info("Upload eerst je PDF-bestanden.")
     st.stop()
 
+current_signature = build_file_signature(uploaded_files)
+
+if st.session_state.last_file_signature != current_signature:
+    st.session_state.parsed_rows = []
+    st.session_state.ai_rows = []
+    st.session_state.last_file_signature = current_signature
+
+col1, col2 = st.columns(2)
+
+with col1:
+    process_clicked = st.button("Verwerk PDF's", use_container_width=True)
+
+with col2:
+    ai_clicked = st.button("Genereer AI-antwoorden", use_container_width=True)
 
 # =========================================================
-# OpenAI client
+# Stap 1: Verwerk PDF's
 # =========================================================
-client = None
-if generate_ai:
+if process_clicked:
+    parsed_rows = []
+    debug_data = []
+
+    for f in uploaded_files:
+        parsed = parse_pdf_to_questions(f.name, f.getvalue())
+
+        if show_debug:
+            debug_data.append(parsed)
+
+        for q in parsed["questions"]:
+            parsed_rows.append({
+                "bestand": Path(f.name).name,
+                "nr": q["nr"],
+                "titel": q["titel"],
+                "vraag": q["vraag"],
+                "ai_antwoord": ""
+            })
+
+    st.session_state.parsed_rows = parsed_rows
+    st.session_state.ai_rows = parsed_rows.copy()
+
+    st.success("PDF's verwerkt. Controleer nu eerst de vragen en klik daarna op 'Genereer AI-antwoorden'.")
+
+# =========================================================
+# Preview van parse-resultaat
+# =========================================================
+if st.session_state.parsed_rows:
+    st.subheader("Preview vragen")
+    preview_df = pd.DataFrame(st.session_state.ai_rows)
+    st.dataframe(preview_df, use_container_width=True)
+else:
+    st.info("Klik op 'Verwerk PDF's' om eerst de vragen uit de PDF's te halen.")
+
+# =========================================================
+# Stap 2: Genereer AI-antwoorden
+# =========================================================
+if ai_clicked:
+    if not st.session_state.parsed_rows:
+        st.error("Verwerk eerst de PDF's voordat je AI-antwoorden genereert.")
+        st.stop()
+
     client = get_openai_client()
     if client is None:
         st.error("OPENAI_API_KEY ontbreekt in Streamlit secrets.")
         st.stop()
-    st.success("AI staat aan en API key is gevonden.")
-else:
-    st.info("AI staat uit. Zet de checkbox aan als je antwoorden wilt genereren.")
 
+    dossier_context = build_global_context(st.session_state.parsed_rows)
+
+    updated_rows = []
+    progress = st.progress(0)
+
+    total = len(st.session_state.parsed_rows)
+
+    for i, row in enumerate(st.session_state.parsed_rows, start=1):
+        with st.spinner(f"AI antwoord genereren voor {row['titel']}..."):
+            ai_answer = cached_generate_ai_answer(
+                vraag_text=row["vraag"],
+                dossier_context=dossier_context,
+                model_name=model_name,
+                prompt_version=PROMPT_VERSION
+            )
+
+        new_row = row.copy()
+        new_row["ai_antwoord"] = ai_answer
+        updated_rows.append(new_row)
+
+        progress.progress(i / total)
+
+    st.session_state.ai_rows = updated_rows
+    st.success("AI-antwoorden zijn gegenereerd.")
 
 # =========================================================
-# Main processing
+# Definitieve preview + download
 # =========================================================
-rows = []
-debug_data = []
+if st.session_state.ai_rows:
+    st.subheader("Output")
+    output_df = pd.DataFrame(st.session_state.ai_rows)
+    st.dataframe(output_df, use_container_width=True)
 
-for f in uploaded_files:
-    lines = extract_lines_from_pdf(f)
-    questions = parse_caseware_questions(lines)
+    excel_bytes = dataframe_to_excel_bytes(st.session_state.ai_rows)
 
-    if show_debug:
-        debug_data.append({
-            "bestand": f.name,
-            "regels": lines,
-            "vragen": questions
-        })
-
-    for q in questions:
-        ai_answer = ""
-
-        if generate_ai:
-            with st.spinner(f"AI antwoord genereren voor {q['titel']}..."):
-                ai_answer = generate_ai_answer(client, q["vraag"], model_name)
-
-        rows.append({
-            "bestand": Path(f.name).name,
-            "nr": q["nr"],
-            "titel": q["titel"],
-            "vraag": q["vraag"],
-            "ai_antwoord": ai_answer
-        })
-
-df = pd.DataFrame(rows)
-
-st.subheader("Preview")
-st.dataframe(df, use_container_width=True)
-
-excel_bytes = to_excel_bytes(df)
-
-st.download_button(
-    "Download Excel",
-    data=excel_bytes,
-    file_name="caseware_overzicht.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
+    st.download_button(
+        "Download Excel",
+        data=excel_bytes,
+        file_name="caseware_overzicht.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
 # =========================================================
 # Debug
 # =========================================================
-if show_debug:
-    st.subheader("Debug")
-
-    for item in debug_data:
-        with st.expander(f"Debug: {item['bestand']}"):
+if show_debug and process_clicked:
+    st.subheader("Debug parsing")
+    for f in uploaded_files:
+        parsed = parse_pdf_to_questions(f.name, f.getvalue())
+        with st.expander(f"Debug: {f.name}"):
             st.write("Ruwe/genormaliseerde regels")
-            st.write(item["regels"])
+            st.write(parsed["lines"])
 
             st.write("Gevonden vragen")
-            st.json(item["vragen"])
+            st.json(parsed["questions"])
