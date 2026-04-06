@@ -57,7 +57,12 @@ def generate_ai_answer(client, vraag_text: str, model_name: str) -> str:
             model=model_name,
             input=prompt
         )
-        return response.output_text.strip()
+        text = response.output_text.strip()
+
+        if not text:
+            return "AI fout: leeg antwoord ontvangen."
+
+        return text
     except Exception as e:
         return f"AI fout: {e}"
 
@@ -326,7 +331,7 @@ with st.sidebar:
     st.subheader("Instellingen")
     show_debug = st.checkbox("Toon debug-info", value=False)
     generate_ai = st.checkbox("Genereer AI-antwoorden", value=False)
-    model_name = st.text_input("Model", value="gpt-5.4")
+    model_name = st.text_input("Model", value="gpt-4.1-mini")
 
 
 # =========================================================
@@ -352,6 +357,9 @@ if generate_ai:
     if client is None:
         st.error("OPENAI_API_KEY ontbreekt in Streamlit secrets.")
         st.stop()
+    st.success("AI staat aan en API key is gevonden.")
+else:
+    st.info("AI staat uit. Zet de checkbox aan als je antwoorden wilt genereren.")
 
 
 # =========================================================
@@ -375,7 +383,8 @@ for f in uploaded_files:
         ai_answer = ""
 
         if generate_ai:
-            ai_answer = generate_ai_answer(client, q["vraag"], model_name)
+            with st.spinner(f"AI antwoord genereren voor {q['titel']}..."):
+                ai_answer = generate_ai_answer(client, q["vraag"], model_name)
 
         rows.append({
             "bestand": Path(f.name).name,
