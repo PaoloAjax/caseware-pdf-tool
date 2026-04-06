@@ -107,7 +107,6 @@ NOISE_STARTS = [
     "clientnaam",
     "cliënt-code",
     "client-code",
-    "jaar",
     "dossier",
     "tabblad",
     "volgnr",
@@ -135,6 +134,9 @@ def is_noise_line(line: str) -> bool:
         return True
 
     if re.match(r"^\d+\s*/\s*\d+$", low):
+        return True
+
+    if "b.v." in low and re.search(r"\b20\d{2}\b", low):
         return True
 
     return False
@@ -222,11 +224,7 @@ def build_question_body(body_lines):
             current_bullet = normalize_bullet(line)
         else:
             if current_bullet is not None:
-                if not current_bullet.endswith("."):
-                    current_bullet += " " + line
-                else:
-                    flush_bullet()
-                    current_paragraph.append(line)
+                current_bullet += " " + line
             else:
                 current_paragraph.append(line)
 
