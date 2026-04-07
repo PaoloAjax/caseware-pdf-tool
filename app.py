@@ -18,7 +18,7 @@ st.write(
     "optioneel AI-antwoorden."
 )
 
-PROMPT_VERSION = "v1"
+PROMPT_VERSION = "v2_short_no_bullets"
 
 # =========================================================
 # Session state init
@@ -31,6 +31,9 @@ if "ai_rows" not in st.session_state:
 
 if "last_file_signature" not in st.session_state:
     st.session_state.last_file_signature = None
+
+if "debug_data" not in st.session_state:
+    st.session_state.debug_data = []
 
 
 # =========================================================
@@ -49,23 +52,27 @@ Je helpt bij het opstellen van een professioneel dossierantwoord voor een CaseWa
 
 Schrijf in het Nederlands.
 Schrijf zakelijk, concreet en compact.
-Gebruik geen markdown.
-Gebruik geen titel, geen inleiding en geen afsluiting.
-Schrijf direct de tekst die in 'Onderbouwing (verplicht)' geplakt kan worden.
+Gebruik GEEN markdown.
+Gebruik GEEN bullets.
+Gebruik GEEN verbindingsstreepjes (-).
+Gebruik GEEN opsommingstekens.
+Schrijf alleen in korte lopende tekst of een korte alinea.
+
+Schrijf zo kort mogelijk, maar wel volledig genoeg om direct in 'Onderbouwing (verplicht)' te plakken.
+Vermijd herhaling, uitleg en inleidende tekst.
+Gebruik bij voorkeur maximaal 3 tot 4 zinnen.
 
 Belangrijke regels:
-- Verwerk expliciet de onderdelen uit de instructie.
-- Gebruik de meegeleverde dossiercontext als bron voor het antwoord.
-- Verzin geen feitelijke details die niet bekend zijn.
-- Als informatie ontbreekt, benoem dan professioneel dat dit nog moet worden afgestemd, onderbouwd of aangevuld.
-- Schrijf alsof dit dossierdocumentatie is van een accountant.
-- Als de instructie meerdere punten bevat, geef dan een nette puntsgewijze uitwerking.
-- Gebruik alleen informatie die volgt uit de context of logisch neutraal geformuleerd kan worden.
+- Verwerk de kern van de instructie.
+- Gebruik de meegeleverde dossiercontext als basis.
+- Verzin geen feiten.
+- Als informatie ontbreekt, benoem dit kort en zakelijk.
+- Schrijf alsof dit direct in een accountantsdossier wordt opgenomen.
 
 Vraag / instructie:
 {vraag_text}
 
-Dossiercontext uit geüploade PDF's:
+Dossiercontext:
 {dossier_context}
 """.strip()
 
@@ -90,8 +97,15 @@ def cached_generate_ai_answer(
             input=prompt
         )
         text = response.output_text.strip()
+
         if not text:
             return "AI fout: leeg antwoord ontvangen."
+
+        # extra schoonmaak om bullets/verbindingsstreepjes alsnog weg te halen
+        text = re.sub(r"(?m)^\s*[-•*]\s*", "", text)
+        text = re.sub(r"\n\s*[-•*]\s*", " ", text)
+        text = re.sub(r"\s{2,}", " ", text).strip()
+
         return text
     except Exception as e:
         return f"AI fout: {e}"
@@ -215,15 +229,16 @@ def is_likely_uppercase_title(line: str) -> bool:
 def detect_question_start(line: str):
     line = normalize_line(line)
 
+    # Genummerde titel
     match = re.match(r"^(\d+)\s+(.+)$", line)
     if match:
         nr = match.group(1).strip()
         title = clean_title(match.group(2).strip())
 
-        if len(title) >= 2:
-            if not (len(nr) == 4 and nr.startswith(("19", "20"))):
-                return nr, title
+        if len(title) >= 2 and not (len(nr) == 4 and nr.startswith(("19", "20"))):
+            return nr, title
 
+    # Ongenummerde titel in hoofdletters
     if is_likely_uppercase_title(line):
         return "", clean_title(line)
 
@@ -369,10 +384,12 @@ def parse_caseware_questions(lines):
 def parse_pdf_to_questions(file_name: str, file_bytes: bytes):
     lines = extract_lines_from_pdf_bytes(file_bytes)
     questions = parse_caseware_questions(lines)
+
     return {
         "bestand": file_name,
         "lines": lines,
         "questions": questions,
+        "question_count": len(questions)
     }
 
 
@@ -424,6 +441,7 @@ with st.sidebar:
         st.session_state.parsed_rows = []
         st.session_state.ai_rows = []
         st.session_state.last_file_signature = None
+        st.session_state.debug_data = []
         st.rerun()
 
 
@@ -445,6 +463,7 @@ current_signature = build_file_signature(uploaded_files)
 if st.session_state.last_file_signature != current_signature:
     st.session_state.parsed_rows = []
     st.session_state.ai_rows = []
+    st.session_state.debug_data = []
     st.session_state.last_file_signature = current_signature
 
 col1, col2 = st.columns(2)
@@ -455,18 +474,23 @@ with col1:
 with col2:
     ai_clicked = st.button("Genereer AI-antwoorden", use_container_width=True)
 
+
 # =========================================================
 # Stap 1: Verwerk PDF's
 # =========================================================
 if process_clicked:
     parsed_rows = []
     debug_data = []
+    summary_rows = []
 
     for f in uploaded_files:
         parsed = parse_pdf_to_questions(f.name, f.getvalue())
 
-        if show_debug:
-            debug_data.append(parsed)
+        debug_data.append(parsed)
+        summary_rows.append({
+            "bestand": f.name,
+            "gevonden_vragen": parsed["question_count"]
+        })
 
         for q in parsed["questions"]:
             parsed_rows.append({
@@ -479,8 +503,13 @@ if process_clicked:
 
     st.session_state.parsed_rows = parsed_rows
     st.session_state.ai_rows = parsed_rows.copy()
+    st.session_state.debug_data = debug_data
 
-    st.success("PDF's verwerkt. Controleer nu eerst de vragen en klik daarna op 'Genereer AI-antwoorden'.")
+    st.success("PDF's verwerkt. Controleer eerst de vragen en klik daarna op 'Genereer AI-antwoorden'.")
+
+    st.subheader("Samenvatting per bestand")
+    st.dataframe(pd.DataFrame(summary_rows), use_container_width=True)
+
 
 # =========================================================
 # Preview van parse-resultaat
@@ -491,6 +520,7 @@ if st.session_state.parsed_rows:
     st.dataframe(preview_df, use_container_width=True)
 else:
     st.info("Klik op 'Verwerk PDF's' om eerst de vragen uit de PDF's te halen.")
+
 
 # =========================================================
 # Stap 2: Genereer AI-antwoorden
@@ -509,7 +539,6 @@ if ai_clicked:
 
     updated_rows = []
     progress = st.progress(0)
-
     total = len(st.session_state.parsed_rows)
 
     for i, row in enumerate(st.session_state.parsed_rows, start=1):
@@ -530,6 +559,7 @@ if ai_clicked:
     st.session_state.ai_rows = updated_rows
     st.success("AI-antwoorden zijn gegenereerd.")
 
+
 # =========================================================
 # Definitieve preview + download
 # =========================================================
@@ -547,14 +577,16 @@ if st.session_state.ai_rows:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
+
 # =========================================================
 # Debug
 # =========================================================
-if show_debug and process_clicked:
+if show_debug and st.session_state.debug_data:
     st.subheader("Debug parsing")
-    for f in uploaded_files:
-        parsed = parse_pdf_to_questions(f.name, f.getvalue())
-        with st.expander(f"Debug: {f.name}"):
+
+    for parsed in st.session_state.debug_data:
+        with st.expander(f"Debug: {parsed['bestand']}"):
+            st.write(f"Aantal gevonden vragen: {parsed['question_count']}")
             st.write("Ruwe/genormaliseerde regels")
             st.write(parsed["lines"])
 
